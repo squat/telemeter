@@ -1,0 +1,59 @@
+#
+# Start a simple telemeter cluster that can be scale up to handle multiple traffic.
+# Expects that an authorization service is running in the same namespace.
+#
+kind: List
+apiVersion: v1
+items:
+- kind: Deployment
+  apiVersion: apps/v1
+  metadata:
+    name: telemeter-bench
+  spec:
+    selector:
+      matchLabels:
+        app: telemeter-bench
+    template:
+      metadata:
+        labels:
+          app: telemeter-bench
+      spec:
+        volumes:
+        - name: credentials
+          secret:
+            secretName: telemeter-bench
+        containers:
+        - name: bench
+          image: openshift/origin-telemeter:v3.11
+          resources:
+            requests:
+              cpu: 5m
+              memory: 20Mi
+            limits:
+              cpu: 20m
+              memory: 50Mi
+          volumeMounts:
+          - name: credentials
+            mountPath: /etc/telemeter
+          env:
+          - name: TO
+            valueFrom:
+              secretKeyRef:
+                name: telemeter-bench
+                key: to
+          - name: FROM
+            valueFrom:
+              secretKeyRef:
+                name: telemeter-bench
+                key: from
+          - name: ID
+            valueFrom:
+              secretKeyRef:
+                name: telemeter-bench
+                key: id
+          command:
+          - /usr/bin/telemeter-bench
+          - --to=$(TO)
+          - --to-token-file=/etc/telemeter/token
+          - --anonymize-salt-file=/etc/telemeter/salt
+          - --match-file=/etc/telemeter/rules
