@@ -41,8 +41,12 @@ func init() {
 	)
 }
 
+type metricsRetriever interface {
+	Retrieve(context.Context, *http.Request) ([]*clientmodel.MetricFamily, error)
+}
+
 type Worker struct {
-	FromClient *metricsclient.Client
+	FromClient metricsRetriever
 	ToClient   *metricsclient.Client
 	Interval   time.Duration
 	Timeout    time.Duration
