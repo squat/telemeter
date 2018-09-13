@@ -1,15 +1,15 @@
 package main
 
 import (
-	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,6 +29,7 @@ func main() {
 		LimitBytes: 200 * 1024,
 		Rules:      []string{`{__name__="up"}`},
 		Interval:   4*time.Minute + 30*time.Second,
+		N:          1000,
 	}
 	cmd := &cobra.Command{
 		Short: "Federate Prometheus via push",
@@ -39,12 +40,8 @@ func main() {
 		},
 	}
 
+	cmd.Flags().IntVar(&opt.N, "number", opt.N, "Number of workers to spawn.")
 	cmd.Flags().StringVar(&opt.Listen, "listen", opt.Listen, "A host:port to listen on for health and metrics.")
-	cmd.Flags().StringVar(&opt.From, "from", opt.From, "The Prometheus server to federate from.")
-	cmd.Flags().StringVar(&opt.FromToken, "from-token", opt.FromToken, "A bearer token to use when authenticating to the source Prometheus server.")
-	cmd.Flags().StringVar(&opt.FromCAFile, "from-ca-file", opt.FromCAFile, "A file containing the CA certificate to use to verify the --from URL in addition to the system roots certificates.")
-	cmd.Flags().StringVar(&opt.FromTokenFile, "from-token-file", opt.FromTokenFile, "A file containing a bearer token to use when authenticating to the source Prometheus server.")
-	cmd.Flags().StringVar(&opt.Identifier, "id", opt.Identifier, "The unique identifier for metrics sent with this client.")
 	cmd.Flags().StringVar(&opt.To, "to", opt.To, "A telemeter server to send metrics to.")
 	cmd.Flags().StringVar(&opt.ToUpload, "to-upload", opt.ToUpload, "A telemeter server endpoint to push metrics to. Will be defaulted for standard servers.")
 	cmd.Flags().StringVar(&opt.ToAuthorize, "to-auth", opt.ToAuthorize, "A telemeter server endpoint to exchange the bearer token for an access token. Will be defaulted for standard servers.")
@@ -72,16 +69,11 @@ type Options struct {
 	Listen     string
 	LimitBytes int64
 
-	From          string
-	To            string
-	ToUpload      string
-	ToAuthorize   string
-	FromCAFile    string
-	FromToken     string
-	FromTokenFile string
-	ToToken       string
-	ToTokenFile   string
-	Identifier    string
+	To          string
+	ToUpload    string
+	ToAuthorize string
+	ToToken     string
+	ToTokenFile string
 
 	RenameFlag []string
 	Renames    map[string]string
@@ -99,6 +91,7 @@ type Options struct {
 	Interval time.Duration
 
 	LabelRetriever transform.LabelRetriever
+	N              int
 }
 
 func (o *Options) Transforms() []transform.Interface {
@@ -125,23 +118,12 @@ func (o *Options) MatchRules() []string {
 }
 
 func (o *Options) Run() error {
-	if len(o.From) == 0 {
-		return fmt.Errorf("you must specify a Prometheus server to federate from (e.g. http://localhost:9090)")
-	}
-
 	if len(o.ToToken) == 0 && len(o.ToTokenFile) > 0 {
 		data, err := ioutil.ReadFile(o.ToTokenFile)
 		if err != nil {
 			return fmt.Errorf("unable to read --to-token-file: %v", err)
 		}
 		o.ToToken = strings.TrimSpace(string(data))
-	}
-	if len(o.FromToken) == 0 && len(o.FromTokenFile) > 0 {
-		data, err := ioutil.ReadFile(o.FromTokenFile)
-		if err != nil {
-			return fmt.Errorf("unable to read --from-token-file: %v", err)
-		}
-		o.FromToken = strings.TrimSpace(string(data))
 	}
 	if len(o.AnonymizeSalt) == 0 && len(o.AnonymizeSaltFile) > 0 {
 		data, err := ioutil.ReadFile(o.AnonymizeSaltFile)
@@ -199,32 +181,60 @@ func (o *Options) Run() error {
 	}
 	o.Rules = rules
 
-	from, err := url.Parse(o.From)
-	if err != nil {
-		return fmt.Errorf("--from is not a valid URL: %v", err)
-	}
-	from.Path = strings.TrimRight(from.Path, "/")
-	if len(from.Path) == 0 {
-		from.Path = "/federate"
+	var ws []forwarder.Worker
+	for i := 0; i < o.N; i++ {
+		c, u, err := o.clientAndURL(i)
+		if err != nil {
+			return fmt.Errorf("failed to generate HTTP client and URL for worker %d: %v", i, err)
+		}
+		worker := forwarder.New(url.URL{}, u, o)
+		worker.ToClient = metricsclient.New(c, o.LimitBytes, o.Interval, "federate_to")
+		worker.FromClient = metricsclient.NewMock()
+		worker.Interval = o.Interval
+		ws[i] = *worker
+		log.Printf("Starting telemeter-client %i reading from mock and sending to %s (listen=%s)", i, o.To, o.Listen)
+
+		go func() {
+			time.Sleep(time.Duration(rand.Intn(int(worker.Interval))))
+			worker.Run()
+		}()
 	}
 
+	if len(o.Listen) > 0 {
+		handlers := http.NewServeMux()
+		telemeterhttp.AddDebug(handlers)
+		telemeterhttp.AddHealth(handlers)
+		telemeterhttp.AddMetrics(handlers)
+		go func() {
+			if err := http.ListenAndServe(o.Listen, handlers); err != nil && err != http.ErrServerClosed {
+				log.Printf("error: server exited: %v", err)
+				os.Exit(1)
+			}
+		}()
+	}
+
+	select {}
+}
+
+func (o *Options) clientAndURL(id int) (*http.Client, *url.URL, error) {
 	var to, toUpload, toAuthorize *url.URL
+	var err error
 	if len(o.ToUpload) > 0 {
 		to, err = url.Parse(o.ToUpload)
 		if err != nil {
-			return fmt.Errorf("--to is not a valid URL: %v", err)
+			return nil, nil, fmt.Errorf("--to is not a valid URL: %v", err)
 		}
 	}
 	if len(o.ToAuthorize) > 0 {
 		toAuthorize, err = url.Parse(o.ToAuthorize)
 		if err != nil {
-			return fmt.Errorf("--to-auth is not a valid URL: %v", err)
+			return nil, nil, fmt.Errorf("--to-auth is not a valid URL: %v", err)
 		}
 	}
 	if len(o.To) > 0 {
 		to, err = url.Parse(o.To)
 		if err != nil {
-			return fmt.Errorf("--to is not a valid URL: %v", err)
+			return nil, nil, fmt.Errorf("--to is not a valid URL: %v", err)
 		}
 		if len(to.Path) == 0 {
 			to.Path = "/"
@@ -232,11 +242,9 @@ func (o *Options) Run() error {
 		if toAuthorize == nil {
 			u := *to
 			u.Path = path.Join(to.Path, "authorize")
-			if len(o.Identifier) > 0 {
-				q := to.Query()
-				q.Add("id", o.Identifier)
-				u.RawQuery = q.Encode()
-			}
+			q := to.Query()
+			q.Add("id", strconv.Itoa(id))
+			u.RawQuery = q.Encode()
 			toAuthorize = &u
 		}
 		if toUpload == nil {
@@ -247,31 +255,9 @@ func (o *Options) Run() error {
 	}
 
 	if toUpload == nil || toAuthorize == nil {
-		return fmt.Errorf("either --to or --to-auth and --to-upload must be specified")
+		return nil, nil, fmt.Errorf("either --to or --to-auth and --to-upload must be specified")
 	}
 
-	fromTransport := metricsclient.DefaultTransport()
-	if len(o.FromCAFile) > 0 {
-		if fromTransport.TLSClientConfig == nil {
-			fromTransport.TLSClientConfig = &tls.Config{}
-		}
-		pool, err := x509.SystemCertPool()
-		if err != nil {
-			return fmt.Errorf("can't read system certificates when --from-ca-file was specified: %v", err)
-		}
-		data, err := ioutil.ReadFile(o.FromCAFile)
-		if err != nil {
-			return fmt.Errorf("can't read --from-ca-file: %v", err)
-		}
-		if !pool.AppendCertsFromPEM(data) {
-			log.Printf("warning: No certs found in --from-ca-file")
-		}
-		fromTransport.TLSClientConfig.RootCAs = pool
-	}
-	fromClient := &http.Client{Transport: fromTransport}
-	if len(o.FromToken) > 0 {
-		fromClient.Transport = telemeterhttp.NewBearerRoundTripper(o.FromToken, fromClient.Transport)
-	}
 	toClient := &http.Client{Transport: metricsclient.DefaultTransport()}
 	if len(o.ToToken) > 0 {
 		// exchange our token for a token from the authorize endpoint, which also gives us a
@@ -280,31 +266,7 @@ func (o *Options) Run() error {
 		o.LabelRetriever = rt
 		toClient.Transport = rt
 	}
-
-	worker := forwarder.New(*from, toUpload, o)
-	worker.ToClient = metricsclient.New(toClient, o.LimitBytes, o.Interval, "federate_to")
-	worker.FromClient = metricsclient.NewMock()
-	worker.Interval = o.Interval
-
-	log.Printf("Starting telemeter-client reading from %s and sending to %s (listen=%s)", o.From, o.To, o.Listen)
-
-	go worker.Run()
-
-	if len(o.Listen) > 0 {
-		handlers := http.NewServeMux()
-		telemeterhttp.AddDebug(handlers)
-		telemeterhttp.AddHealth(handlers)
-		telemeterhttp.AddMetrics(handlers)
-		handlers.Handle("/federate", serveLastMetrics(worker))
-		go func() {
-			if err := http.ListenAndServe(o.Listen, handlers); err != nil && err != http.ErrServerClosed {
-				log.Printf("error: server exited: %v", err)
-				os.Exit(1)
-			}
-		}()
-	}
-
-	select {}
+	return toClient, toUpload, nil
 }
 
 // serveLastMetrics retrieves the last set of metrics served
