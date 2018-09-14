@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
-	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -191,11 +190,11 @@ func (o *Options) Run() error {
 		worker.ToClient = metricsclient.New(c, o.LimitBytes, o.Interval, "federate_to")
 		worker.FromClient = metricsclient.NewMock()
 		worker.Interval = o.Interval
-		ws[i] = *worker
+		ws = append(ws, *worker)
 		log.Printf("Starting telemeter-client %i reading from mock and sending to %s (listen=%s)", i, o.To, o.Listen)
 
 		go func() {
-			time.Sleep(time.Duration(rand.Intn(int(worker.Interval))))
+			//time.Sleep(time.Duration(rand.Intn(int(worker.Interval))))
 			worker.Run()
 		}()
 	}

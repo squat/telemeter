@@ -2,6 +2,7 @@ package forwarder
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -150,5 +151,6 @@ func (w *Worker) forward(ctx context.Context, from *url.URL, transforms []transf
 	}
 
 	req = &http.Request{Method: "POST", URL: w.to}
+	fmt.Println(families)
 	return w.ToClient.Send(ctx, req, families)
 }

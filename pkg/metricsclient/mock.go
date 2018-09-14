@@ -18,7 +18,7 @@ func NewMock() *mock {
 	r := prometheus.NewRegistry()
 	g := prometheus.NewGauge(
 		prometheus.GaugeOpts{
-			Name: "mock metric",
+			Name: "mock_metric",
 			Help: "This is a mock metric.",
 		},
 	)
