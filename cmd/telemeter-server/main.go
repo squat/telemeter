@@ -55,7 +55,7 @@ route requests to a consistent server so that Prometheus always sees the same me
 for a given remote client for a given member.
 
 A client that connects to the server must perform an authorization check, providing
-a Bearer token and a cluster identifier (as ?cluster=<id>) against the /authorize 
+a Bearer token and a cluster identifier (as ?id=<id>) against the /authorize
 endpoint. The authorize endpoint will forward that request to an upstream server that 
 may approve or reject the request as well as add additional labels that will be added
 to all future metrics from that client. The server will generate a JWT token with a
@@ -369,7 +369,7 @@ func (o *Options) Run() error {
 		clusterAuth = tollbooth.NewAuthorizer(authorizeClient, authorizeURL)
 	}
 
-	auth := jwt.NewAuthorizeClusterHandler(o.PartitionKey, o.TokenExpireSeconds, signer, o.RequiredLabels, clusterAuth)
+	auth := jwt.NewAuthorizeClusterHandler(o.PartitionKey, o.TokenExpireSeconds, o.Ratelimit, signer, o.RequiredLabels, clusterAuth)
 	validator := validate.New(o.PartitionKey, o.LimitBytes, 24*time.Hour)
 
 	// Create a rate-limited store with a memory-store as its persistence.

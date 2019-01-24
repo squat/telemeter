@@ -7,8 +7,11 @@ import (
 	"math/rand"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/openshift/telemeter/pkg/authorize"
+	"github.com/openshift/telemeter/pkg/store/ratelimited"
+	"golang.org/x/time/rate"
 )
 
 type authorizeClusterHandler struct {
@@ -17,6 +20,8 @@ type authorizeClusterHandler struct {
 	expireInSeconds int64
 	signer          *Signer
 	clusterAuth     authorize.ClusterAuthorizer
+	limit           time.Duration
+	limits          map[string]*rate.Limiter
 }
 
 // NewAuthorizerHandler creates an authorizer HTTP endpoint that will authorize the cluster
@@ -26,13 +31,15 @@ type authorizeClusterHandler struct {
 // in a generated signed JWT which is returned to the client, along with any labels.
 //
 // A single partition key parameter must be passed to uniquely identify the caller's data.
-func NewAuthorizeClusterHandler(partitionKey string, expireInSeconds int64, signer *Signer, labels map[string]string, ca authorize.ClusterAuthorizer) *authorizeClusterHandler {
+func NewAuthorizeClusterHandler(partitionKey string, expireInSeconds int64, limit time.Duration, signer *Signer, labels map[string]string, ca authorize.ClusterAuthorizer) *authorizeClusterHandler {
 	return &authorizeClusterHandler{
 		partitionKey:    partitionKey,
 		expireInSeconds: expireInSeconds,
 		signer:          signer,
 		labels:          labels,
 		clusterAuth:     ca,
+		limit:           limit,
+		limits:          make(map[string]*rate.Limiter),
 	}
 }
 
@@ -54,6 +61,17 @@ func (a *authorizeClusterHandler) ServeHTTP(w http.ResponseWriter, req *http.Req
 	cluster := req.Form.Get(uniqueIDKey)
 	if len(cluster) == 0 {
 		http.Error(w, fmt.Sprintf("The '%s' parameter must be specified via URL or url-encoded form body", uniqueIDKey), http.StatusBadRequest)
+		return
+	}
+
+	limiter, ok := a.limits[cluster]
+	if !ok {
+		limiter = rate.NewLimiter(rate.Every(a.limit), 1)
+		a.limits[cluster] = limiter
+	}
+
+	if !limiter.AllowN(time.Now(), 1) {
+		http.Error(w, ratelimited.ErrWriteLimitReached.Error(), http.StatusTooManyRequests)
 		return
 	}
 

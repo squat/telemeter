@@ -38,6 +38,9 @@ check: lint
 test-integration: build
 	./test/integration.sh
 
+test-e2e: build
+	./test/e2e.sh
+
 vendor:
 	glide update -v --skip-test
 

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"net/http"
 	"net/http/httptest"
@@ -191,7 +192,7 @@ func TestAuthorizeClusterHandler(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := NewAuthorizeClusterHandler(partitionKey, 2, tc.signer, labels, tc.clusterAuth)
+			h := NewAuthorizeClusterHandler(partitionKey, 2, 5*time.Minute, tc.signer, labels, tc.clusterAuth)
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, tc.req)
 			if err := tc.check(rec); err != nil {
